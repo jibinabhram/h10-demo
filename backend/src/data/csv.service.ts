@@ -1,3 +1,5 @@
+// --- src/data/csv.service.ts ---
+
 import { Injectable } from '@nestjs/common';
 import axios from 'axios';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -22,143 +24,83 @@ export class CsvService {
 
   async importCsvFromEsp32(ip: string, filename: string) {
     const url = `http://${ip}/download?file=${filename}`;
-    console.log('\n📌 Fetching CSV from ESP32:', url);
+    console.log(`📥 Fetching CSV: ${url}`);
 
-    let response;
+    let responseText = '';
     try {
-      response = await axios.get(url, { responseType: 'text' });
-      console.log('✅ RAW CSV RESPONSE LENGTH:', response.data.length);
-      console.log('✅ RAW CSV PREVIEW:\n', response.data.slice(0, 500));
+      const response = await axios.get(url, { responseType: 'text' });
+      responseText = response.data;
+      console.log(`📄 CSV LENGTH = ${responseText.length}`);
     } catch (err) {
-      console.error('❌ ESP32 HTTP Error:', err.message);
-      throw new Error('ESP32 not reachable or download failed.');
+      throw new Error('ESP32 unreachable or file missing');
     }
 
-    if (!response.data || response.data.length === 0) {
-      throw new Error('❌ CSV file empty on ESP32.');
+    if (!responseText.trim()) {
+      throw new Error('CSV file empty');
     }
 
     const rows: any[] = [];
-    const stream = Readable.from([response.data]);
+    const stream = Readable.from([responseText]);
 
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
       stream
         .pipe(csvParser({ mapHeaders: ({ header }) => header.trim() }))
-        .on('data', (row) => {
-          rows.push(row);
-        })
+        .on('data', (row) => rows.push(row))
         .on('end', async () => {
           if (rows.length === 0) {
-            return reject(
-              new Error('CSV parsed but no rows found — header mismatch?'),
-            );
+            return reject(new Error('CSV parsed but header mismatch.'));
           }
 
-          try {
-            /* ================= RAW DATA ================= */
+          // ---------------- FORMAT RAW DATA ----------------
+          const formatted = rows.map((r) => ({
+            player_id: Number(r.player_id),
 
-            const formattedRows: Partial<RawData>[] = rows.map((row) => ({
-              player_id: Number(row.player_id),
+            latitude: Number(r.lat),
+            longitude: Number(r.lon),
 
-              latitude: Number(row.lat),
-              longitude: Number(row.lon),
+            w: Number(r.gyro_w) || 0,
+            x: Number(r.gyro_x) || 0,
+            y: Number(r.gyro_y) || 0,
+            z: Number(r.gyro_z) || 0,
 
-              w: Number(row.gyro_w) || 0,
-              x: Number(row.gyro_x) || 0,
-              y: Number(row.gyro_y) || 0,
-              z: Number(row.gyro_z) || 0,
+            distance: Number(r.distance) || 0,
+            speed: Number(r.speed) || 0,
 
-              distance: Number(row.distance) || 0,
-              speed: Number(row.speed) || 0,
+            timestamp: r.timestamp
+              ? new Date(Number(r.timestamp) * 1000)
+              : new Date(),
 
-              timestamp: row.timestamp
-                ? new Date(Number(row.timestamp) * 1000)
-                : new Date(),
+            heartrate: Number(r.heartrate) || 0,
+          }));
 
-              heartrate: row.heartrate ? Number(row.heartrate) : 0,
-            }));
+          const rawEntities = this.rawRepo.create(formatted);
+          await this.rawRepo.save(rawEntities);
 
-            console.log('🟢 Saving RAW data:', formattedRows.length, 'rows');
-
-            const rawEntities = this.rawRepo.create(formattedRows);
-            await this.rawRepo.save(rawEntities);
-
-            /* ============== GROUP BY PLAYER ============== */
-
-            const groupedByPlayer: Record<number, RawData[]> = {};
-
-            for (const row of rawEntities) {
-              if (!groupedByPlayer[row.player_id]) {
-                groupedByPlayer[row.player_id] = [];
-              }
-              groupedByPlayer[row.player_id].push(row);
-            }
-
-            let playersProcessed = 0;
-
-            /* ============= CALCULATE + SAVE ============= */
-
-            for (const playerId in groupedByPlayer) {
-              const playerRows = groupedByPlayer[playerId];
-
-              let calculated: Partial<CalculatedData> =
-                this.calculationService.computeMetrics(playerRows);
-
-              // ✅ DEFAULT VALUES IF EMPTY
-              if (!calculated || Object.keys(calculated).length === 0) {
-                calculated = {
-                  player_id: Number(playerId),
-
-                  total_distance: 0,
-                  hsr_distance: 0,
-                  sprint_distance: 0,
-                  top_speed: 0,
-                  sprint_count: 0,
-
-                  accelerations: 0,
-                  decelerations: 0,
-
-                  max_acceleration: 0,
-                  max_deceleration: 0,
-
-                  player_load: 0,
-                  power_score: 0,
-
-                  hr_max: playerRows[0]?.heartrate || 0,
-                  time_in_red_zone: 0,
-                  percent_in_red_zone: 0,
-                  hr_recovery_time: 0,
-                };
-              }
-
-              // ✅ Convert to entity
-              const entity = this.calcRepo.create(calculated);
-
-              // ✅ Save to DB
-              await this.calcRepo.save(entity);
-
-              playersProcessed++;
-            }
-
-            console.log('✅ CALCULATED data saved for', playersProcessed, 'players');
-
-            resolve({
-              message:
-                'CSV imported and calculated data generated successfully ✅',
-              rowsInserted: formattedRows.length,
-              playersCalculated: playersProcessed,
-              filename,
-            });
-
-          } catch (err) {
-            console.error('❌ Database Insert Error:', err);
-            reject(new Error('Failed to save rows to database.'));
+          // ---------------- GROUP BY PLAYER ----------------
+          const grouped: Record<number, RawData[]> = {};
+          for (const row of rawEntities) {
+            if (!grouped[row.player_id]) grouped[row.player_id] = [];
+            grouped[row.player_id].push(row);
           }
+
+          let processed = 0;
+
+          // ---------------- CALCULATE + SAVE ----------------
+          for (const pid in grouped) {
+            const calc = this.calculationService.computeMetrics(grouped[pid]);
+            const entity = this.calcRepo.create(calc);
+            await this.calcRepo.save(entity);
+            processed++;
+          }
+
+          resolve({
+            message: 'CSV imported + metrics calculated successfully',
+            rowsInserted: rawEntities.length,
+            playersCalculated: processed,
+            filename,
+          });
         })
-        .on('error', (err) => {
-          console.error('❌ CSV Parsing Error:', err);
-          reject(new Error('Error while parsing CSV.'));
-        });
+        .on('error', () => reject(new Error('CSV parsing failed')));
     });
   }
 }

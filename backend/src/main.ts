@@ -2,12 +2,25 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { json, urlencoded } from 'express';
 
-async function bootstrap(){
+async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  app.enableCors();
-  app.use(json({ limit: '30mb' }));
-  app.use(urlencoded({ extended: true, limit: '30mb' }));
-  await app.listen(3000);
-  console.log('Server running');
+
+  // 🔥 REQUIRED: Fix Network Error for React Native + Render
+  app.enableCors({
+    origin: '*',
+    methods: 'GET,POST,PUT,DELETE,OPTIONS',
+    allowedHeaders: 'Content-Type,Authorization',
+  });
+
+  // 🔥 Support large CSV uploads
+  app.use(json({ limit: '50mb' }));
+  app.use(urlencoded({ limit: '50mb', extended: true }));
+
+  // 🔥 Render uses dynamic PORT
+  const port = process.env.PORT || 3000;
+  await app.listen(port);
+
+  console.log(`🚀 Server running on port ${port}`);
 }
+
 bootstrap();
