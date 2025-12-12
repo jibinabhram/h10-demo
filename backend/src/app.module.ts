@@ -11,6 +11,9 @@ import { DataModule } from './data/data.module';
     TypeOrmModule.forRoot({
       type: 'postgres',
       url: process.env.DATABASE_URL,
+      ssl: {
+        rejectUnauthorized: false,   // ✅ REQUIRED FOR RENDER POSTGRESQL
+      },
       autoLoadEntities: true,
       synchronize: true,
     }),
