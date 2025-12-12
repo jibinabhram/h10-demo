@@ -21,6 +21,8 @@
     "noImplicitAny": false,
     "strictBindCallApply": false,
     "noFallthroughCasesInSwitch": false,
-    "types": ["node", "Multer"], 
-  }
+    "types": ["node"]  // <-- FIXED (removed wrong Multer)
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
 }
