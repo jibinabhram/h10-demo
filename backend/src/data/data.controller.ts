@@ -225,48 +225,53 @@ export class DataController {
   // ===========================================================
   // GET /data/player-history
   // ===========================================================
-  @Get('player-history')
-  async getPlayerHistory(
-    @Query('playerId') playerId: string,
-    @Query('dates') dates: string,
-  ) {
-    if (!playerId || !dates)
-      throw new BadRequestException('playerId and dates required');
+// ===========================================================
+// GET /data/player-history
+// ===========================================================
+@Get('player-history')
+async getPlayerHistory(
+  @Query('playerId') playerId: string,
+  @Query('dates') dates: string,
+) {
+  if (!playerId || !dates)
+    throw new BadRequestException('playerId and dates required');
 
-    const id = Number(playerId);
-    const dateList = dates.split(',');
+  const id = Number(playerId);
+  const dateList = dates.split(',');
 
-    const filters = dateList
-      .map((d) => {
-        const dt = new Date(d);
-        if (isNaN(dt.getTime())) return null;
+  const filters = dateList
+    .map((d) => {
+      const dt = new Date(d);
+      if (isNaN(dt.getTime())) return null;
 
-        const start = new Date(dt);
-        const end = new Date(dt);
-        start.setUTCHours(0, 0, 0, 0);
-        end.setUTCHours(23, 59, 59, 999);
+      const start = new Date(dt);
+      const end = new Date(dt);
+      start.setUTCHours(0, 0, 0, 0);
+      end.setUTCHours(23, 59, 59, 999);
 
-        return { start, end };
-      })
-      .filter(Boolean);
+      return { start, end };
+    })
+    .filter((item): item is { start: Date; end: Date } => item !== null); // ✔ FIX 1: type guard
 
-    if (filters.length === 0) return [];
+  if (filters.length === 0) return [];
 
-    const whereClauses = filters
-      .map((_, i) => `(c.created_at BETWEEN :start${i} AND :end${i})`)
-      .join(' OR ');
+  const whereClauses = filters
+    .map((_, i) => `(c.created_at BETWEEN :start${i} AND :end${i})`)
+    .join(' OR ');
 
-    const params = filters.reduce((acc, f, i) => {
-      acc[`start${i}`] = f.start;
-      acc[`end${i}`] = f.end;
-      return acc;
-    }, {});
+  const params = filters.reduce((acc, f, i) => {
+    if (!f) return acc; // ✔ FIX 2 (safety)
+    acc[`start${i}`] = f.start;
+    acc[`end${i}`] = f.end;
+    return acc;
+  }, {} as Record<string, Date>);
 
-    return this.calcRepo
-      .createQueryBuilder('c')
-      .where('c.player_id = :id', { id })
-      .andWhere(`(${whereClauses})`, params)
-      .orderBy('created_at', 'DESC')
-      .getMany();
-  }
+  return this.calcRepo
+    .createQueryBuilder('c')
+    .where('c.player_id = :id', { id })
+    .andWhere(`(${whereClauses})`, params)
+    .orderBy('created_at', 'DESC')
+    .getMany();
+}
+
 }
