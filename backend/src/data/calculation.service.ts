@@ -5,37 +5,26 @@ import { RawData } from './entities/raw-data.entity';
 import { CalculatedData } from './entities/calculated-data.entity';
 
 // ================= CONSTANTS =================
-const EARTH_RADIUS_M = 6371000;          // meters
-const G_ACCEL = 9.80665;                 // m/s²
+const EARTH_RADIUS_M = 6371000;
+const G_ACCEL = 9.80665;
 
-const V_HSR_MS = 4.0;                    // 14.4 km/h
-const V_SPRINT_MS = 7.0;                 // 25.2 km/h
-const A_EVENT_TH = 3.0;                  // m/s²
-const T_MIN_ACCEL_S = 1.0;               // minimal duration
+const V_HSR_MS = 4.0;        // High-speed running (m/s)
+const V_SPRINT_MS = 7.0;     // Sprint (m/s)
+const A_EVENT_TH = 3.0;      // Accel/decel threshold
+const T_MIN_ACCEL_S = 1.0;
 
-const HR_RED_ZONE_PERCENT = 0.9;         // 90%
-const PL_SCALE = 100;                    // player load normalization
+const HR_RED_ZONE_PERCENT = 0.9;
+const PL_SCALE = 100;
 
-const C0 = 4.0;                           // Metabolic power baseline
-const C1 = 2.0;                           // Metabolic power scaling
+const C0 = 4.0;
+const C1 = 2.0;
 
-// Types for internal processing
-interface ProcessedDataPoint {
-  dt_k: number;
-  d_k: number;
-  v_k: number;
-  a_k: number;
-  hr: number;
-  pl_delta: number;
-  metabolic_power_k: number;
-}
+// ------------------------------------------------
 
 @Injectable()
 export class CalculationService {
 
-  // --------------------------------------------------------
-  // GPS Distance using Haversine Formula
-  // --------------------------------------------------------
+  // ================= GPS DISTANCE =================
   private haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
     const R = EARTH_RADIUS_M;
     const f1 = lat1 * Math.PI / 180;
@@ -43,162 +32,134 @@ export class CalculationService {
     const df = (lat2 - lat1) * Math.PI / 180;
     const dl = (lon2 - lon1) * Math.PI / 180;
 
-    const a = Math.sin(df / 2) ** 2 + Math.cos(f1) * Math.cos(f2) * Math.sin(dl / 2) ** 2;
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const a =
+      Math.sin(df / 2) ** 2 +
+      Math.cos(f1) * Math.cos(f2) * Math.sin(dl / 2) ** 2;
 
-    return R * c;
+    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
   }
 
-  // --------------------------------------------------------
-  // Player Load Delta (Gyro change)
-  // --------------------------------------------------------
-  private calculatePlayerLoadDelta(ax1: number, ay1: number, az1: number, ax2: number, ay2: number, az2: number): number {
-    const dx = (ax2 ?? 0) - (ax1 ?? 0);
-    const dy = (ay2 ?? 0) - (ay1 ?? 0);
-    const dz = (az2 ?? 0) - (az1 ?? 0);
-    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  // ================= PLAYER LOAD =================
+  private playerLoadDelta(
+    x1 = 0, y1 = 0, z1 = 0,
+    x2 = 0, y2 = 0, z2 = 0
+  ): number {
+    return Math.sqrt(
+      (x2 - x1) ** 2 +
+      (y2 - y1) ** 2 +
+      (z2 - z1) ** 2
+    );
   }
 
-  // --------------------------------------------------------
-  // MAIN METRICS CALCULATION
-  // --------------------------------------------------------
-  computeMetrics(rawData: RawData[]): CalculatedData {
+  // ================= MAIN CALCULATION =================
+  computeMetrics(raw: RawData[]): CalculatedData {
     const result = new CalculatedData();
 
-    if (!rawData || rawData.length < 2) {
-      result.player_id = rawData?.[0]?.player_id ?? 0;
+    if (!raw || raw.length < 2) {
+      result.player_id = raw?.[0]?.player_id ?? 0;
       return result;
     }
 
-    result.player_id = rawData[0].player_id;
+    result.player_id = raw[0].player_id;
+    result.created_at = raw[0].timestamp;
 
-    const processed: ProcessedDataPoint[] = [];
-    let totalTime = 0;
+    let totalDistance = 0;
+    let hsrDistance = 0;
+    let sprintDistance = 0;
     let totalPL = 0;
+    let totalTime = 0;
     let totalMetPower = 0;
 
-    for (let i = 0; i < rawData.length - 1; i++) {
-      const A = rawData[i];
-      const B = rawData[i + 1];
+    let sprintCount = 0;
+    let accelCount = 0;
+    let decelCount = 0;
 
-      const tA = new Date(A.timestamp).getTime();
-      const tB = new Date(B.timestamp).getTime();
+    let inSprint = false;
+    let sprintTime = 0;
 
-      if (isNaN(tA) || isNaN(tB)) continue;
+    let maxSpeed = 0;
+    let maxAccel = 0;
+    let maxDecel = 0;
 
-      const dt = (tB - tA) / 1000;
+    let prevSpeed = 0;
+
+    for (let i = 0; i < raw.length - 1; i++) {
+      const A = raw[i];
+      const B = raw[i + 1];
+
+      const t1 = +new Date(A.timestamp);
+      const t2 = +new Date(B.timestamp);
+      const dt = (t2 - t1) / 1000;
       if (dt <= 0) continue;
 
       totalTime += dt;
 
       const d = this.haversine(A.latitude, A.longitude, B.latitude, B.longitude);
       const v = d / dt;
+      const a = (v - prevSpeed) / dt;
 
-      const vPrev = processed.length ? processed[processed.length - 1].v_k : 0;
-      const a = (v - vPrev) / dt;
+      prevSpeed = v;
 
-      const pl = this.calculatePlayerLoadDelta(
-        A.x ?? 0, A.y ?? 0, A.z ?? 0,
-        B.x ?? 0, B.y ?? 0, B.z ?? 0,
-      );
-      totalPL += pl;
+      totalDistance += d;
+      if (v > V_HSR_MS) hsrDistance += d;
+      if (v > V_SPRINT_MS) sprintDistance += d;
 
-      const mp = v * (C0 + C1 * (a / G_ACCEL));
-      totalMetPower += mp * dt;
+      maxSpeed = Math.max(maxSpeed, v);
+      maxAccel = Math.max(maxAccel, a);
+      maxDecel = Math.min(maxDecel, a);
 
-      processed.push({
-        dt_k: dt,
-        d_k: d,
-        v_k: v,
-        a_k: a,
-        hr: A.heartrate ?? 0,
-        pl_delta: pl,
-        metabolic_power_k: mp,
-      });
-    }
-
-    // ================= DISTANCES =================
-    const totalDistance = processed.reduce((s, d) => s + d.d_k, 0);
-    const hsrDistance = processed.filter(d => d.v_k > V_HSR_MS).reduce((s, d) => s + d.d_k, 0);
-    const sprintDistance = processed.filter(d => d.v_k > V_SPRINT_MS).reduce((s, d) => s + d.d_k, 0);
-
-    // ================= SPEED =================
-    const topSpeed = Math.max(...processed.map(d => d.v_k));
-
-    // ================= SPRINTS =================
-    let sprintCount = 0, inSprint = false, sprintTime = 0;
-
-    for (const d of processed) {
-      if (d.v_k > V_SPRINT_MS) {
-        sprintTime += d.dt_k;
+      // Sprint detection
+      if (v > V_SPRINT_MS) {
+        sprintTime += dt;
         if (!inSprint) inSprint = true;
       } else if (inSprint) {
         if (sprintTime >= T_MIN_ACCEL_S) sprintCount++;
         sprintTime = 0;
         inSprint = false;
       }
+
+      // Accel / Decel
+      if (a > A_EVENT_TH) accelCount++;
+      if (a < -A_EVENT_TH) decelCount++;
+
+      // Player load
+      totalPL += this.playerLoadDelta(
+        A.x, A.y, A.z,
+        B.x, B.y, B.z
+      );
+
+      // Metabolic power
+      const mp = v * (C0 + C1 * (a / G_ACCEL));
+      totalMetPower += mp * dt;
     }
-
-    // ================= ACCEL / DECEL COUNT =================
-    let accel = 0, decel = 0;
-    let inA = false, inD = false;
-    let tA = 0, tD = 0;
-
-    for (const d of processed) {
-      if (d.a_k > A_EVENT_TH) {
-        tA += d.dt_k;
-        if (!inA) inA = true;
-      } else if (inA) {
-        if (tA >= T_MIN_ACCEL_S) accel++;
-        tA = 0; inA = false;
-      }
-
-      if (d.a_k < -A_EVENT_TH) {
-        tD += d.dt_k;
-        if (!inD) inD = true;
-      } else if (inD) {
-        if (tD >= T_MIN_ACCEL_S) decel++;
-        tD = 0; inD = false;
-      }
-    }
-
-    // ================= MAX ACCEL / DECEL =================
-    const maxAccel = Math.max(...processed.map(d => d.a_k));
-    const maxDecel = Math.min(...processed.map(d => d.a_k));
-
-    // ================= PLAYER LOAD =================
-    const playerLoad = totalPL / PL_SCALE;
-
-    // ================= METABOLIC POWER =================
-    const powerScore = totalTime > 0 ? totalMetPower / totalTime : 0;
 
     // ================= HR METRICS =================
-    const hr = rawData.map(r => r.heartrate).filter(h => h > 0);
+    const hr = raw.map(r => r.heartrate).filter(h => h > 0);
     const hrMax = hr.length ? Math.max(...hr) : 0;
-    const hrThresh = hrMax * HR_RED_ZONE_PERCENT;
+    const redZone = hr.filter(h => h >= hrMax * HR_RED_ZONE_PERCENT).length;
 
-    const redSamples = hr.filter(h => h >= hrThresh).length;
-    const percentRed = hr.length ? (redSamples / hr.length) * 100 : 0;
-
-    // ================= RESULT =================
+    // ================= FINAL ASSIGN =================
     result.total_distance = +totalDistance.toFixed(2);
     result.hsr_distance = +hsrDistance.toFixed(2);
     result.sprint_distance = +sprintDistance.toFixed(2);
-    result.top_speed = +topSpeed.toFixed(2);
-    result.sprint_count = sprintCount;
+    result.top_speed = +maxSpeed.toFixed(2);
 
-    result.accelerations = accel;
-    result.decelerations = decel;
+    result.sprint_count = sprintCount;
+    result.accelerations = accelCount;
+    result.decelerations = decelCount;
 
     result.max_acceleration = +maxAccel.toFixed(2);
     result.max_deceleration = +maxDecel.toFixed(2);
 
-    result.player_load = +playerLoad.toFixed(2);
-    result.power_score = +powerScore.toFixed(2);
+    result.player_load = +(totalPL / PL_SCALE).toFixed(2);
+    result.power_score = totalTime ? +(totalMetPower / totalTime).toFixed(2) : 0;
 
     result.hr_max = hrMax;
-    result.time_in_red_zone = redSamples;
-    result.percent_in_red_zone = +percentRed.toFixed(2);
+    result.time_in_red_zone = redZone;
+    result.percent_in_red_zone = hr.length
+      ? +((redZone / hr.length) * 100).toFixed(2)
+      : 0;
+
     result.hr_recovery_time = +(hrMax / 10).toFixed(2);
 
     return result;

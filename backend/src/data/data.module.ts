@@ -15,6 +15,10 @@ import { DataController } from './data.controller';
 @Module({
   imports: [TypeOrmModule.forFeature([RawData, CalculatedData])],
   controllers: [DataController],
-  providers: [WifiService, CsvService, CalculationService],
+  providers: [
+    WifiService,
+    CsvService,
+    CalculationService, // ✅ MUST BE HERE
+  ],
 })
 export class DataModule {}
