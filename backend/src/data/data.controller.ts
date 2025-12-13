@@ -72,14 +72,13 @@ export class DataController {
     }
 
     // 4️⃣ Calculate + Save metrics
-    for (const [, playerRows] of grouped) {
-      if (playerRows.length < 2) continue;
+for (const [, playerRows] of grouped) {
+  const calculated =
+    this.calculationService.computeMetrics(playerRows);
 
-      const calculated =
-        this.calculationService.computeMetrics(playerRows);
+  await this.calcRepo.save(calculated);
+}
 
-      await this.calcRepo.save(calculated);
-    }
 
     return {
       message: `Saved ${rows.length} raw rows & calculated metrics`,
